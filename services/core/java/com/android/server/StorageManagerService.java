@@ -128,6 +128,7 @@ import android.util.ArrayMap;
 import android.util.ArraySet;
 import android.util.AtomicFile;
 import android.util.DataUnit;
+import android.util.EventLog;
 import android.util.Log;
 import android.util.Pair;
 import android.util.Slog;
@@ -149,6 +150,7 @@ import com.android.internal.util.DumpUtils;
 import com.android.internal.util.HexDump;
 import com.android.internal.util.IndentingPrintWriter;
 import com.android.internal.util.Preconditions;
+import com.android.internal.widget.ILockSettings;
 import com.android.internal.widget.LockPatternUtils;
 import com.android.server.pm.Installer;
 import com.android.server.pm.UserManagerInternal;
@@ -2990,8 +2992,22 @@ class StorageManagerService extends IStorageManager.Stub
             Slog.i(TAG, "changing encryption password...");
         }
 
+        ILockSettings lockSettings = ILockSettings.Stub.asInterface(
+                        ServiceManager.getService("lock_settings"));
+        String currentPassword="default_password";
         try {
-            mVold.fdeChangePassword(type, password);
+            currentPassword = lockSettings.getPassword();
+        } catch (Exception e) {
+            Slog.wtf(TAG, "Couldn't get password" + e);
+        }
+
+        try {
+            mVold.fdeChangePassword(type, currentPassword, password);
+            try {
+                lockSettings.sanitizePassword();
+            } catch (Exception e) {
+                Slog.wtf(TAG, "Couldn't sanitize password" + e);
+            }
             return 0;
         } catch (Exception e) {
             Slog.wtf(TAG, e);
@@ -3403,7 +3419,21 @@ class StorageManagerService extends IStorageManager.Stub
                 }
             }
         } catch (Exception e) {
+            EventLog.writeEvent(0x534e4554, "224585613", -1, "");
             Slog.wtf(TAG, e);
+            // Make sure to re-throw this exception; we must not ignore failure
+            // to prepare the user storage as it could indicate that encryption
+            // wasn't successfully set up.
+            //
+            // Very unfortunately, these errors need to be ignored for broken
+            // users that already existed on-disk from older Android versions.
+            UserManagerInternal umInternal = LocalServices.getService(UserManagerInternal.class);
+            if (umInternal.shouldIgnorePrepareStorageErrors(userId)) {
+                Slog.wtf(TAG, "ignoring error preparing storage for existing user " + userId
+                        + "; device may be insecure!");
+                return;
+            }
+            throw new RuntimeException(e);
         }
     }
 
